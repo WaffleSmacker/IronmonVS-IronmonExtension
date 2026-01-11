@@ -35,7 +35,9 @@ The Monitor is a standalone program that sends your run data to the website. Usi
 
 ### Set Up Instructions
 
-1. Launch the Program: Open IronmonVsMonitor.exe.
+1. Launch the Program: Open IronmonVsMonitor.exe.  (if you can't find it, you can also click "options" in the ironmonvs extension in the ironmon tracker.<br>
+<img src="https://github.com/user-attachments/assets/1530e088-6590-4863-8c17-a692ee59d543" width="300" />
+<br><br>
 2. Connect Twitch: Go to Settings and click Connect Twitch.<br>
 <img src="https://github.com/user-attachments/assets/b2ceae25-69de-4b80-9d90-84992f9b92c1" width="300" /><br><br>
 
