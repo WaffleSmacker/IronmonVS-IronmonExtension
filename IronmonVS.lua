@@ -3,7 +3,7 @@ local function IronmonVS()
 		version = "1.0",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
-		description = "Created for Ironmon VS. Used to send data to the website.",
+		description = "Created for Ironmon VS. Used to send data to the website. Click 'Options' to boot the monitor.",
 		github = "WaffleSmacker/IronmonVS-IronmonExtension",
 	}
 
