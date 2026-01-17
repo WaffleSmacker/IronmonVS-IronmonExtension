@@ -1,9 +1,9 @@
 local function IronmonVS()
 	local self = {
-		version = "1.0",
+		version = "1.1",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
-		description = "Created for Ironmon VS. Used to send data to the website. Click 'Options' to boot the monitor.",
+		description = "Created for Ironmon VS. Used to send data to the website.",
 		github = "WaffleSmacker/IronmonVS-IronmonExtension",
 	}
 
@@ -17,28 +17,6 @@ local function IronmonVS()
 		local compareFunc = function(a, b) return a ~= b and not Utils.isNewerVersion(a, b) end -- if current version is *older* than online version
 		local isUpdateAvailable = Utils.checkForVersionUpdate(versionCheckUrl, self.version, versionResponsePattern, compareFunc)
 		return isUpdateAvailable, downloadUrl
-	end
-
-	-- Executed when the user clicks the "Options" button while viewing the extension details within the Tracker's UI
-	function self.configureOptions()
-		if not Main.IsOnBizhawk() then return end
-
-		-- Get the IronmonVS folder path (one level deeper from extensions folder)
-		local extFolderPath = FileManager.getCustomFolderPath() .. "IronmonVS" .. FileManager.slash
-		local monitorExePath = extFolderPath .. "IronmonVsMonitor.exe"
-		
-		-- Try to launch the monitor program directly
-		-- If it doesn't exist, open the folder instead so user can see what's there
-		local file = io.open(monitorExePath, "r")
-		if file then
-			-- Monitor exe exists, launch it
-			file:close()
-			-- Use start command on Windows to launch the exe
-			os.execute('start "" "' .. monitorExePath .. '"')
-		else
-			-- Monitor exe doesn't exist, open the folder in explorer
-			os.execute('explorer "' .. extFolderPath .. '"')
-		end
 	end
 
 	-- Data output file path
@@ -248,16 +226,8 @@ local function IronmonVS()
 		return defeatedCount == totalCount and totalCount > 0
 	end
 
-	-- Get all dungeon full clear statuses (optimized to only check when needed)
-	local function getDungeonFullClears(checkOnlySpecificDungeon)
-		-- If a specific dungeon is requested, only check that one
-		if checkOnlySpecificDungeon then
-			local dungeonClears = {}
-			dungeonClears[checkOnlySpecificDungeon] = isDungeonFullCleared(checkOnlySpecificDungeon)
-			return dungeonClears
-		end
-		
-		-- Otherwise check all dungeons (used during initialization and updates)
+	-- Get all dungeon full clear statuses
+	local function getDungeonFullClears()
 		local dungeonClears = {}
 		for _, dungeonName in ipairs(self.DUNGEONS) do
 			dungeonClears[dungeonName] = isDungeonFullCleared(dungeonName)
@@ -265,23 +235,8 @@ local function IronmonVS()
 		return dungeonClears
 	end
 
-	
-	-- Get the highest milestone achieved (with caching to reduce repeated checks)
+	-- Get the highest milestone achieved
 	local function getHighestMilestone()
-		-- Use cached result if available (computed earlier in this update cycle)
-		if cachedMilestones then
-			local highestMilestone = nil
-			for i = #self.MILESTONE_ORDER, 1, -1 do
-				local milestone = self.MILESTONE_ORDER[i]
-				if cachedMilestones[milestone] then
-					highestMilestone = milestone
-					break
-				end
-			end
-			return highestMilestone, cachedMilestones
-		end
-		
-		-- Recalculate milestones (only when cache is empty)
 		local beat_lab = Program.hasDefeatedTrainer(326) or Program.hasDefeatedTrainer(327) or Program.hasDefeatedTrainer(328)
 		local beat_brock = Program.hasDefeatedTrainer(414)
 		local beat_misty = Program.hasDefeatedTrainer(415)
@@ -314,9 +269,6 @@ local function IronmonVS()
 			champ = beat_champ
 		}
 
-		-- Cache the results for this update cycle
-		cachedMilestones = milestones
-
 		-- Find the highest milestone achieved
 		local highestMilestone = nil
 		for i = #self.MILESTONE_ORDER, 1, -1 do
@@ -337,7 +289,6 @@ local function IronmonVS()
 			return info
 		end
 
-		local V = self.PerSeedVars
 		local seedNumber = Main.currentSeed
 		local playTime = Program.GameTimer:getText()
 		local currentDate = os.date("%Y-%m-%d")
@@ -353,29 +304,15 @@ local function IronmonVS()
 		local highestMilestone, allMilestones = getHighestMilestone()
 		local favoritePokemon = getFavoritePokemonName()
 		local trainerCount = getTotalDefeatedTrainers(false)
-		
-		-- Use cached dungeon clear statuses instead of recalculating (performance optimization)
-		local dungeonClears = {
-			MtMoon = V.FullCleared_MtMoon or false,
-			RockTunnel = V.FullCleared_RockTunnel or false,
-			SilphCo = V.FullCleared_SilphCo or false,
-			RocketHideout = V.FullCleared_RocketHideout or false,
-			SSAnne = V.FullCleared_SSAnne or false,
-			VictoryRoad = V.FullCleared_VictoryRoad or false,
-			PokemonTower = V.FullCleared_PokemonTower or false,
-			CinnabarMansion = V.FullCleared_CinnabarMansion or false
-		}
+		local dungeonClears = getDungeonFullClears()
 		
 		-- Get current route name
 		local routeName = RouteData.Info[TrackerAPI.getMapId()].name or "Unknown Area"
 		
-		-- Get RandomSeed from RandomizerLog if available (with caching to avoid re-parsing)
+		-- Get RandomSeed from RandomizerLog if available
 		-- The log must be parsed via RandomizerLog.parseLog(filepath) first
-		local randomSeed = V.CachedRandomSeed
-		
-		-- Only parse if not already cached
-		if not randomSeed then
-			local success, result = pcall(function()
+		local randomSeed = nil
+		local success, result = pcall(function()
 			if type(RandomizerLog) == "table" then
 				if type(RandomizerLog.Data) == "table" then
 					-- First check if already parsed
@@ -484,9 +421,7 @@ local function IronmonVS()
 		end)
 		if success and result then
 			randomSeed = result
-			V.CachedRandomSeed = result -- Cache the result to avoid re-parsing
 		end
-	end
 
 		-- Calculate badge count (badges are earned from brock through giovanni)
 		local badgeCount = 0
@@ -580,7 +515,6 @@ local function IronmonVS()
 		FullCleared_VictoryRoad = false,
 		FullCleared_PokemonTower = false,
 		FullCleared_CinnabarMansion = false,
-		CachedRandomSeed = nil, -- Cache the parsed random seed to avoid re-parsing
 	}
 
 	function self.getHpPercent()
@@ -606,11 +540,9 @@ local function IronmonVS()
 		V.FullCleared_VictoryRoad = false
 		V.FullCleared_PokemonTower = false
 		V.FullCleared_CinnabarMansion = false
-		V.CachedRandomSeed = nil -- Reset random seed cache on new seed
 	end
 
 	local loadedVarsThisSeed
-	local lastSeed = nil -- Track the last seed to detect seed changes
 	local function isPlayingFRLG() return GameSettings.game == 3 end
 
 	-- Check for first pokemon choice and write data to file
@@ -778,7 +710,7 @@ local function IronmonVS()
 		end
 	end
 
-	-- Check for dungeon full clears and send update (optimized to only check uncleared dungeons)
+	-- Check for dungeon full clears and send update
 	local function checkForDungeonFullClears()
 		if not Program.isValidMapLocation() then
 			return
@@ -796,32 +728,41 @@ local function IronmonVS()
 			return
 		end
 
-		-- Only check dungeons that haven't been cleared yet (optimization)
+		local dungeonClears = getDungeonFullClears()
 		local shouldUpdate = false
-		local dungeonsToCheck = {}
-		local dungeonNames = {
-			"MtMoon", "RockTunnel", "SilphCo", "RocketHideout",
-			"SSAnne", "VictoryRoad", "PokemonTower", "CinnabarMansion"
-		}
-		local dungeonVars = {
-			"FullCleared_MtMoon", "FullCleared_RockTunnel", "FullCleared_SilphCo", "FullCleared_RocketHideout",
-			"FullCleared_SSAnne", "FullCleared_VictoryRoad", "FullCleared_PokemonTower", "FullCleared_CinnabarMansion"
-		}
-		
-		-- Build list of dungeons that still need checking
-		for i, dungeonName in ipairs(dungeonNames) do
-			if not V[dungeonVars[i]] then
-				table.insert(dungeonsToCheck, {name = dungeonName, var = dungeonVars[i]})
-			end
+
+		-- Check each dungeon for new full clears
+		if dungeonClears.MtMoon and not V.FullCleared_MtMoon then
+			V.FullCleared_MtMoon = true
+			shouldUpdate = true
 		end
-		
-		-- Only check dungeons that haven't been cleared yet
-		for _, dungeon in ipairs(dungeonsToCheck) do
-			local isCleared = isDungeonFullCleared(dungeon.name)
-			if isCleared then
-				V[dungeon.var] = true
-				shouldUpdate = true
-			end
+		if dungeonClears.RockTunnel and not V.FullCleared_RockTunnel then
+			V.FullCleared_RockTunnel = true
+			shouldUpdate = true
+		end
+		if dungeonClears.SilphCo and not V.FullCleared_SilphCo then
+			V.FullCleared_SilphCo = true
+			shouldUpdate = true
+		end
+		if dungeonClears.RocketHideout and not V.FullCleared_RocketHideout then
+			V.FullCleared_RocketHideout = true
+			shouldUpdate = true
+		end
+		if dungeonClears.SSAnne and not V.FullCleared_SSAnne then
+			V.FullCleared_SSAnne = true
+			shouldUpdate = true
+		end
+		if dungeonClears.VictoryRoad and not V.FullCleared_VictoryRoad then
+			V.FullCleared_VictoryRoad = true
+			shouldUpdate = true
+		end
+		if dungeonClears.PokemonTower and not V.FullCleared_PokemonTower then
+			V.FullCleared_PokemonTower = true
+			shouldUpdate = true
+		end
+		if dungeonClears.CinnabarMansion and not V.FullCleared_CinnabarMansion then
+			V.FullCleared_CinnabarMansion = true
+			shouldUpdate = true
 		end
 
 		if shouldUpdate then
@@ -831,120 +772,39 @@ local function IronmonVS()
 		end
 	end
 
-	-- Frame counter for staggered initialization to improve bootup time
-	local initFrameCounter = 0
-	local initPhase = 0 -- 0 = basic init, 1 = milestone init, 2 = trainer count init, 3 = dungeon init, 4 = complete
-	local cachedMilestones = nil -- Cache milestone data to avoid repeated checks
-
 	-- Executed once every 30 frames, after most data from game memory is read in
 	function self.afterProgramDataUpdate()
-		-- Clear milestone cache at the start of each update cycle for fresh data
-		cachedMilestones = nil
-		
-		-- Detect seed changes and reset initialization state
-		local currentSeed = Main.currentSeed
-		if lastSeed ~= nil and lastSeed ~= currentSeed then
-			-- Seed changed, reset everything
-			loadedVarsThisSeed = false
-			initPhase = 0
-			initFrameCounter = 0
-			cachedMilestones = nil
-			self.resetSeedVars()
-		end
-		lastSeed = currentSeed
-		
 		-- Once per seed, when the player is able to move their character, initialize the seed variables
 		if not isPlayingFRLG() or not Program.isValidMapLocation() then
 			return
-		end
-		
-		-- Handle staggered initialization phases (only during initial setup)
-		if not loadedVarsThisSeed or initPhase < 4 then
+		elseif not loadedVarsThisSeed then
+			self.resetSeedVars()
+			loadedVarsThisSeed = true
+			
+			-- Check if player has milestone progress to set LastMilestone and LastTrainerCount
 			local leadPokemon = Tracker.getPokemon(1, true) or Tracker.getDefaultPokemon()
-			if not PokemonData.isValid(leadPokemon.pokemonID) then
-				return
-			end
-			
-			local V = self.PerSeedVars
-			
-			-- Phase 0: Basic reset (immediate)
-			if initPhase == 0 then
-				self.resetSeedVars()
-				cachedMilestones = nil -- Reset cache
-				initPhase = 1
-				initFrameCounter = 0
-				loadedVarsThisSeed = true -- Mark as loaded so other functions can run immediately
-				return -- Defer expensive operations to next frame
-			end
-			
-			-- Phase 1: Milestone initialization (fast - only 14 trainer checks)
-			if initPhase == 1 then
-				local currentMilestone, allMilestones = getHighestMilestone()
-				cachedMilestones = allMilestones -- Cache the results
+			if PokemonData.isValid(leadPokemon.pokemonID) then
+				local currentMilestone = getHighestMilestone()
+				local V = self.PerSeedVars
 				if currentMilestone then
 					V.LastMilestone = currentMilestone
+					-- Initialize trainer count
+					V.LastTrainerCount = getTotalDefeatedTrainers(false)
 				end
-				-- Initialize basic trainer defeat tracking (only a few checks)
+				-- Initialize trainer defeat tracking
 				V.BeatTrainer102 = Program.hasDefeatedTrainer(102)
 				V.BeatTrainer329 = Program.hasDefeatedTrainer(329) or Program.hasDefeatedTrainer(330) or Program.hasDefeatedTrainer(331)
-				initPhase = 2
-				initFrameCounter = 0
-				return -- Defer expensive operations to later
-			end
-			
-			-- Phase 2: Trainer count initialization (expensive - all routes)
-			-- Only do this after a few frames to let other systems initialize
-			if initPhase == 2 then
-				initFrameCounter = initFrameCounter + 1
-				if initFrameCounter >= 3 then -- Wait 3 frames (90 frames of game time)
-					if V.LastMilestone then
-						V.LastTrainerCount = getTotalDefeatedTrainers(false)
-					else
-						V.LastTrainerCount = 0
-					end
-					initPhase = 3
-					initFrameCounter = 0
-				end
-				return
-			end
-			
-			-- Phase 3: Dungeon initialization (expensive - 8 dungeon checks)
-			-- Stagger this across multiple frames to avoid blocking
-			if initPhase == 3 then
-				initFrameCounter = initFrameCounter + 1
-				if initFrameCounter >= 2 then -- Wait 2 frames between dungeon checks
-					-- Initialize dungeon full clear tracking one at a time
-					-- We'll check all dungeons but spread across multiple update cycles
-					local dungeonsToCheck = {
-						"MtMoon", "RockTunnel", "SilphCo", "RocketHideout",
-						"SSAnne", "VictoryRoad", "PokemonTower", "CinnabarMansion"
-					}
-					local currentDungeonIndex = math.min(
-						math.floor((initFrameCounter - 2) / 2) + 1,
-						#dungeonsToCheck
-					)
-					
-					if currentDungeonIndex <= #dungeonsToCheck then
-						local dungeonName = dungeonsToCheck[currentDungeonIndex]
-						local isCleared = isDungeonFullCleared(dungeonName)
-						if dungeonName == "MtMoon" then V.FullCleared_MtMoon = isCleared
-						elseif dungeonName == "RockTunnel" then V.FullCleared_RockTunnel = isCleared
-						elseif dungeonName == "SilphCo" then V.FullCleared_SilphCo = isCleared
-						elseif dungeonName == "RocketHideout" then V.FullCleared_RocketHideout = isCleared
-						elseif dungeonName == "SSAnne" then V.FullCleared_SSAnne = isCleared
-						elseif dungeonName == "VictoryRoad" then V.FullCleared_VictoryRoad = isCleared
-						elseif dungeonName == "PokemonTower" then V.FullCleared_PokemonTower = isCleared
-						elseif dungeonName == "CinnabarMansion" then V.FullCleared_CinnabarMansion = isCleared
-						end
-					end
-					
-					-- Check if all dungeons are done
-					if currentDungeonIndex >= #dungeonsToCheck then
-						initPhase = 4 -- Complete
-						initFrameCounter = 0
-					end
-				end
-				return
+				
+				-- Initialize dungeon full clear tracking
+				local dungeonClears = getDungeonFullClears()
+				V.FullCleared_MtMoon = dungeonClears.MtMoon or false
+				V.FullCleared_RockTunnel = dungeonClears.RockTunnel or false
+				V.FullCleared_SilphCo = dungeonClears.SilphCo or false
+				V.FullCleared_RocketHideout = dungeonClears.RocketHideout or false
+				V.FullCleared_SSAnne = dungeonClears.SSAnne or false
+				V.FullCleared_VictoryRoad = dungeonClears.VictoryRoad or false
+				V.FullCleared_PokemonTower = dungeonClears.PokemonTower or false
+				V.FullCleared_CinnabarMansion = dungeonClears.CinnabarMansion or false
 			end
 		end
 
