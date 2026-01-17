@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.1",
+		version = "1.2",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -17,6 +17,28 @@ local function IronmonVS()
 		local compareFunc = function(a, b) return a ~= b and not Utils.isNewerVersion(a, b) end -- if current version is *older* than online version
 		local isUpdateAvailable = Utils.checkForVersionUpdate(versionCheckUrl, self.version, versionResponsePattern, compareFunc)
 		return isUpdateAvailable, downloadUrl
+	end
+
+	-- Executed when the user clicks the "Options" button while viewing the extension details within the Tracker's UI
+	function self.configureOptions()
+		if not Main.IsOnBizhawk() then return end
+
+		-- Get the IronmonVS folder path (one level deeper from extensions folder)
+		local extFolderPath = FileManager.getCustomFolderPath() .. "IronmonVS" .. FileManager.slash
+		local monitorExePath = extFolderPath .. "IronmonVsMonitor.exe"
+		
+		-- Try to launch the monitor program directly
+		-- If it doesn't exist, open the folder instead so user can see what's there
+		local file = io.open(monitorExePath, "r")
+		if file then
+			-- Monitor exe exists, launch it
+			file:close()
+			-- Use start command on Windows to launch the exe
+			os.execute('start "" "' .. monitorExePath .. '"')
+		else
+			-- Monitor exe doesn't exist, open the folder in explorer
+			os.execute('explorer "' .. extFolderPath .. '"')
+		end
 	end
 
 	-- Data output file path
