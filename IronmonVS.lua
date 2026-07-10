@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.29",
+		version = "1.30",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -73,8 +73,20 @@ local function IronmonVS()
 	-- warning appear essentially as soon as the loaded seed can be read.
 	self.WRONG_SEED_GRACE = 1
 	self.WrongSeed = false
+	-- Wrong-ROM detection: the loaded ROM isn't the competition's AutoRandomized ROM at all
+	-- (e.g. a stale or base ROM opened directly in Bizhawk). The seed-content check alone
+	-- MISSES this in "Generate ROM each time" mode -- the seed log is named after the settings
+	-- file, so getLoadedSeed() reads the last generated seed's log even when a different ROM is
+	-- loaded, making a wrong ROM look correct. Comparing the loaded ROM name catches it.
+	self.WrongRom = false
+	-- End-of-run grace: for a short window after a run ends, the loaded seed churns (the
+	-- tracker/monitor rolls to the next seed while the finished ROM is still up). Show a calm
+	-- "End of run detected" instead of alarming "WRONG SEED" during that window.
+	self.RUN_END_GRACE = 30
+	self.RunEnd = { at = nil }
+	self.RunEndRecent = false
 	self.LoadedSeed = { value = nil, lastRead = 0 }
-	self.SeedCheck = { lastCheck = 0, mismatchSince = nil, lastLoaded = nil, lastExpected = nil }
+	self.SeedCheck = { lastCheck = 0, mismatchSince = nil, lastLoaded = nil, lastExpected = nil, lastWrongRom = false }
 
 	-- Monitor-running warning state (throttled file check + current verdict).
 	self.MonitorWarn = {
@@ -860,6 +872,7 @@ local function IronmonVS()
 
 	self.PerSeedVars = {
 		PokemonDead = false,
+		RunEndRecorded = false,   -- run-over (death or champ) recorded once, for the end-of-run grace
 		LastMilestone = nil,
 		FirstPokemonChosen = false,
 		LastTrainerCount = 0,
@@ -886,6 +899,8 @@ local function IronmonVS()
 		self.SeenTrainers = {}
 		local V = self.PerSeedVars
 		V.PokemonDead = false
+		V.RunEndRecorded = false
+		self.RunEnd.at = nil
 		V.LastMilestone = nil
 		V.FirstPokemonChosen = false
 		V.LastTrainerCount = 0
@@ -1222,10 +1237,24 @@ local function IronmonVS()
 			local hpPercentage = self.getHpPercent()
 			if hpPercentage ~= nil and hpPercentage == 0 and V.PokemonDead == false then
 				V.PokemonDead = true
+				self.markRunEnded()   -- start the end-of-run grace (suppress "wrong seed" churn)
 				local data = collectSimplifiedData(leadPokemon)
 				writeDataToFile(data)
 			end
 		end
+
+		-- Champion win also ends the run; the player will roll to the next seed afterward, so
+		-- treat the seed churn that follows as "end of run" rather than "wrong seed".
+		if not V.RunEndRecorded and getHighestMilestone() == "champ" then
+			self.markRunEnded()
+		end
+	end
+
+	-- Record that the current run is over (once per seed). Stamps the time so the seed check
+	-- can show "End of run detected" for RUN_END_GRACE seconds instead of "WRONG SEED".
+	function self.markRunEnded()
+		self.PerSeedVars.RunEndRecorded = true
+		self.RunEnd.at = os.time()
 	end
 
 	-- Read the heartbeat file the monitor refreshes; returns its epoch seconds or nil.
@@ -1290,7 +1319,7 @@ local function IronmonVS()
 	local function drawSeedDisplay()
 		if not Main.IsOnBizhawk() or not isPlayingFRLG() then return end
 
-		if self.WrongSeed then
+		if self.WrongSeed and not self.RunEndRecent then
 			local expected = self.SeedInfo.seed or "?"
 			local loaded = self.LoadedSeed.value and tostring(self.LoadedSeed.value) or "?"
 			local boxW, boxH = 88, 44
@@ -1417,26 +1446,70 @@ local function IronmonVS()
 		return self.LoadedSeed.value
 	end
 
-	-- Decide (throttled) whether the loaded seed mismatches the expected competition seed.
+	-- The ROM name a correct competition New Run produces: "<settings file> AutoRandomized"
+	-- (same recipe the tracker uses to name the generated ROM + its log). Only meaningful in
+	-- "Generate ROM each time" mode; nil otherwise (premade-ROM mode reads the log next to the
+	-- actual loaded ROM, so its seed-content check already can't be fooled by a wrong ROM).
+	local function getExpectedRomName()
+		if not (type(Options) == "table" and Options["Generate ROM each time"]
+			and Options.FILES and not Utils.isNilOrEmpty(Options.FILES["Settings File"])) then
+			return nil
+		end
+		local settingsFileName = FileManager.extractFileNameFromPath(Options.FILES["Settings File"])
+		if Utils.isNilOrEmpty(settingsFileName) then return nil end
+		return settingsFileName .. " " .. FileManager.PostFixes.AUTORANDOMIZED
+	end
+
+	-- Decide (throttled) whether the wrong ROM or wrong seed is loaded vs the competition's
+	-- expected seed. Only enforces when a competition seed is expected (current_seed.txt). Also
+	-- flags whether we're within the end-of-run grace window, so the draw code can soften a
+	-- transient mismatch into "End of run detected" instead of "WRONG SEED".
 	local function updateSeedCheck()
 		local now = os.time()
 		if now - (self.SeedCheck.lastCheck or 0) < 1 then return end
 		self.SeedCheck.lastCheck = now
+
 		local expected = tonumber(self.SeedInfo.seed)
+
+		-- No competition seed expected -> nothing to enforce.
+		if not expected then
+			self.WrongSeed, self.WrongRom, self.RunEndRecent = false, false, false
+			self.SeedCheck.mismatchSince = nil
+			self.SeedCheck.lastLoaded, self.SeedCheck.lastExpected = nil, nil
+			return
+		end
+
+		-- Just after a run ends, expect the loaded seed to churn -- label mismatches gently.
+		self.RunEndRecent = self.RunEnd.at ~= nil and (now - self.RunEnd.at) < self.RUN_END_GRACE
+
+		-- Wrong ROM (name mismatch) takes priority over the seed-content check, since a wrong
+		-- ROM makes the seed read unreliable (see getExpectedRomName / findLoadedLogPath notes).
+		local wrongRom = false
+		local expectedRom = getExpectedRomName()
+		if expectedRom then
+			local loadedRom = GameSettings.getRomName()
+			wrongRom = (not Utils.isNilOrEmpty(loadedRom)) and (loadedRom ~= expectedRom)
+		end
+
 		local loaded = getLoadedSeed()
-		if not expected or not loaded or loaded == expected then
-			self.WrongSeed = false
+		local wrongSeed = (not wrongRom) and (loaded ~= nil) and (loaded ~= expected)
+
+		if not (wrongRom or wrongSeed) then
+			self.WrongSeed, self.WrongRom = false, false
 			self.SeedCheck.mismatchSince = nil
 		else
-			-- Restart the grace timer if either seed changed (e.g. just re-rolled).
+			-- Restart the grace timer if the situation changed (e.g. just re-rolled / swapped).
 			if self.SeedCheck.lastLoaded ~= loaded or self.SeedCheck.lastExpected ~= expected
-				or not self.SeedCheck.mismatchSince then
+				or self.SeedCheck.lastWrongRom ~= wrongRom or not self.SeedCheck.mismatchSince then
 				self.SeedCheck.mismatchSince = now
 			end
-			self.WrongSeed = (now - self.SeedCheck.mismatchSince) >= self.WRONG_SEED_GRACE
+			local stable = (now - self.SeedCheck.mismatchSince) >= self.WRONG_SEED_GRACE
+			self.WrongRom = stable and wrongRom
+			self.WrongSeed = stable and wrongSeed
 		end
 		self.SeedCheck.lastLoaded = loaded
 		self.SeedCheck.lastExpected = expected
+		self.SeedCheck.lastWrongRom = wrongRom
 	end
 
 	-- Banner warning the player they've loaded a seed that isn't the competition's current
@@ -1448,6 +1521,29 @@ local function IronmonVS()
 		Drawing.drawText(6, 2, "WRONG SEED LOADED", 0xFFFFFF00, 0xFF000000)
 		Drawing.drawText(6, 12, "Check your New Run setup, then", 0xFFFFFFFF, 0xFF000000)
 		Drawing.drawText(6, 23, "press A + B + Start", 0xFFFFFFFF, 0xFF000000)
+	end
+
+	-- Banner warning the player they've loaded the WRONG ROM (not the competition's
+	-- AutoRandomized ROM) -- e.g. a stale or base ROM opened directly. A New Run generates
+	-- the correct, server-assigned seed ROM.
+	local function drawWrongRomWarning()
+		if not Main.IsOnBizhawk() then return end
+		local w = Constants.SCREEN.WIDTH
+		gui.drawRectangle(0, 0, w, 38, 0xFFCC0000, 0xFFCC0000)
+		Drawing.drawText(6, 2, "WRONG ROM LOADED", 0xFFFFFF00, 0xFF000000)
+		Drawing.drawText(6, 12, "Not your competition ROM.", 0xFFFFFFFF, 0xFF000000)
+		Drawing.drawText(6, 23, "Create a new seed (New Run).", 0xFFFFFFFF, 0xFF000000)
+	end
+
+	-- Calm banner shown when a seed mismatch is really just the churn right after a run ends
+	-- (death / champ). Avoids alarming the player with "WRONG SEED" for expected end-of-run
+	-- behavior; a New Run rolls to the next seed.
+	local function drawEndOfRunBanner()
+		if not Main.IsOnBizhawk() then return end
+		local w = Constants.SCREEN.WIDTH
+		gui.drawRectangle(0, 0, w, 27, 0xFF1E7A1E, 0xFF1E7A1E)
+		Drawing.drawText(6, 2, "End of run detected", 0xFFFFFFFF, 0xFF000000)
+		Drawing.drawText(6, 13, "Start a New Run for your next seed", 0xFFFFFFFF, 0xFF000000)
 	end
 
 	-- ===================== GHOST PLAYERS (optional, removable) =====================
@@ -2068,6 +2164,11 @@ local function IronmonVS()
 			drawSetupBanner()
 		elseif self.MonitorWarn.active then
 			drawMonitorWarning()
+		elseif (self.WrongSeed or self.WrongRom) and self.RunEndRecent then
+			-- Right after a run ends, a mismatch is expected churn -- don't cry "wrong seed".
+			drawEndOfRunBanner()
+		elseif self.WrongRom then
+			drawWrongRomWarning()
 		elseif self.WrongSeed then
 			drawWrongSeedWarning()
 		end
