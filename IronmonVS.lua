@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.32",
+		version = "1.33",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -1911,10 +1911,14 @@ local function IronmonVS()
 	local PUDDLE_FILL = 0xFFFF3030             -- ARGB red base (alpha applied per-draw)
 	local PUDDLE_FILL_A = 70                     -- faded fill opacity
 	local PUDDLE_EDGE_A = 120                    -- slightly stronger rim
+	local PUDDLE_INFO_MAX = 3                    -- info-panel rows shown at once; extras cycle through
+	local PUDDLE_CYCLE_FRAMES = 300             -- frames each page of names shows before cycling (~5s)
+	local PUDDLE_TEST = 0                        -- DEV ONLY: inject N fake runs on Oak's Lab (5,13,15) to test the panel; MUST be 0 to release
 	local puddleInPath                          -- set in self.startup()
 	local puddles = {}                          -- list of {name,map,x,y,milestone,mon,lvl}
 	local puddleFrame = 0
 	local pPxStill, pPyStill, pScoxStill, pScoyStill, pLastScox, pLastScoy  -- own smooth-scroll calibration
+	local pFrameScox, pFrameScoy   -- per-frame scroll detection to force redraws while you walk
 
 	-- Parse puddle_in.txt (TSV, 7 columns) into `puddles`. Independent of the ghost reader.
 	local function puddleRead()
@@ -1935,20 +1939,46 @@ local function IronmonVS()
 				end
 			end
 		end
+		-- DEV test data: pretend a crowd fell on WaffleSmacker's Oak's Lab tile (5,13,15) so the
+		-- cycling info panel can be exercised without needing many real runs. PUDDLE_TEST must be 0
+		-- for any release (guarded by refresh_bundle.py).
+		if PUDDLE_TEST > 0 then
+			local names = { "Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi", "Ivan", "Judy" }
+			local mons = { "Bulbasaur", "Charmander", "Squirtle", "Pidgey", "Nidoran", "Mankey", "Caterpie", "Pikachu" }
+			local miles = { "", "beat_brock", "", "beat_misty", "" }
+			for i = 1, PUDDLE_TEST do
+				table.insert(list, { name = names[(i - 1) % #names + 1], map = 5, x = 13, y = 15,
+					milestone = miles[(i - 1) % #miles + 1], mon = mons[(i - 1) % #mons + 1],
+					lvl = tostring(5 + i) })
+			end
+		end
 		puddles = list
 	end
 
 	-- Small panel (top-left) naming who fell on/next to the player's tile. Stacks all nearby.
 	local function puddleDrawInfo(list)
-		local x, y = 6, 14
-		local header = (#list == 1) and "Run ended here:" or (tostring(#list) .. " runs ended here:")
-		Drawing.drawText(x, y, header, withAlpha(0xFFFF6666, 255), withAlpha(0x000000, 210))
-		local row = 0
-		for _, p in ipairs(list) do
-			if row >= 4 then
-				Drawing.drawText(x, y + 12 + row * 10, "...", withAlpha(0xFFFFFFFF, 255), withAlpha(0x000000, 210))
-				break
-			end
+		local n = #list
+		-- When several runs ended on the same tile, show at most PUDDLE_INFO_MAX at once and cycle
+		-- through the rest (every PUDDLE_CYCLE_FRAMES) so the panel never runs off the screen.
+		local pages = math.ceil(n / PUDDLE_INFO_MAX)
+		local page = (pages > 1) and (math.floor(puddleFrame / PUDDLE_CYCLE_FRAMES) % pages) or 0
+		local first = page * PUDDLE_INFO_MAX + 1
+		local last = math.min(first + PUDDLE_INFO_MAX - 1, n)
+
+		-- Build the display lines first so we can size a translucent background box behind them --
+		-- the plain drop-shadow text was hard to read over busy tiles.
+		local lines = {}
+		local header
+		if n == 1 then
+			header = "Run ended here:"
+		elseif pages > 1 then
+			header = string.format("%d ended here (%d-%d):", n, first, last)
+		else
+			header = n .. " runs ended here:"
+		end
+		lines[#lines + 1] = { text = header, color = 0xFFFF6666 }
+		for i = first, last do
+			local p = list[i]
 			local detail = p.name
 			if p.mon and p.mon ~= "" then
 				detail = detail .. " - " .. p.mon
@@ -1957,8 +1987,19 @@ local function IronmonVS()
 			if p.milestone and p.milestone ~= "" and p.milestone ~= "none" then
 				detail = detail .. " (" .. p.milestone .. ")"
 			end
-			Drawing.drawText(x, y + 12 + row * 10, detail, withAlpha(0xFFFFFFFF, 255), withAlpha(0x000000, 210))
-			row = row + 1
+			lines[#lines + 1] = { text = detail, color = 0xFFFFFFFF }
+		end
+		-- Box sized to the longest line (~5px per glyph in the Tracker font) + padding, matching the
+		-- seed-display panel's look (thin black rim + ~75% dark fill).
+		local maxChars = 0
+		for _, ln in ipairs(lines) do
+			if #ln.text > maxChars then maxChars = #ln.text end
+		end
+		local bx, by = 3, 12
+		local boxW, boxH = maxChars * 5 + 9, #lines * 10 + 4
+		gui.drawRectangle(bx, by, boxW, boxH, 0xFF000000, 0xC0000000)
+		for i, ln in ipairs(lines) do
+			Drawing.drawText(bx + 3, by + 2 + (i - 1) * 10, ln.text, withAlpha(ln.color, 255), withAlpha(0x000000, 210))
 		end
 	end
 
@@ -2013,6 +2054,28 @@ local function IronmonVS()
 		puddleFrame = puddleFrame + 1
 		if puddleFrame % PUDDLE_READ_EVERY == 1 then   -- read on frame 1 too (no startup delay)
 			pcall(puddleRead)
+		end
+		-- Keep the markers glued to the world while you walk. A puddle's screen position is derived
+		-- from the live camera offset (like the ghosts), so at the Tracker's idle ~2Hz redraw the
+		-- markers visibly lag the scrolling map -- that's the "puddle lag". Mirror the ghost fix:
+		-- force a per-frame redraw, but ONLY while the world is actually scrolling AND a puddle sits
+		-- on the current map, so we never pin the emulator at 60Hz for nothing.
+		if #puddles == 0 then return end
+		local scoxNow = readS16(GHOST_SCO_X)
+		local scoyNow = readS16(GHOST_SCO_Y)
+		local scrolling = (pFrameScox ~= nil and (scoxNow ~= pFrameScox or scoyNow ~= pFrameScoy))
+		pFrameScox = scoxNow
+		pFrameScoy = scoyNow
+		if not (Program and Program.Frames) then return end
+		local myMap = TrackerAPI.getMapId() or 0
+		local onMap = false
+		for _, p in ipairs(puddles) do
+			if p.map == myMap then onMap = true; break end
+		end
+		-- Force a redraw while the world scrolls (glue markers to the map) or at each info-panel
+		-- cycle boundary (so a crowded tile's names rotate visibly even when you're standing still).
+		if onMap and (scrolling or (puddleFrame % PUDDLE_CYCLE_FRAMES) <= 1) then
+			Program.Frames.waitToDraw = 0
 		end
 	end
 	-- =================== END DEATH PUDDLES =========================================
