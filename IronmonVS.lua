@@ -285,6 +285,11 @@ local function IronmonVS()
 		jsonContent = jsonContent .. '  "trainerCount": ' .. tostring(data.trainerCount or 0) .. ",\n"
 		jsonContent = jsonContent .. '  "badgeCount": ' .. tostring(data.badgeCount or 0) .. ",\n"
 		jsonContent = jsonContent .. '  "routeName": "' .. escapeJson(data.routeName or "Unknown Area") .. '",\n'
+		-- Run-end overworld tile (map id + x/y) for the death-puddle overlay other players
+		-- see on the same seed. Frozen where the run ends (the finishing snapshot).
+		jsonContent = jsonContent .. '  "death_map": ' .. tostring(data.death_map or 0) .. ",\n"
+		jsonContent = jsonContent .. '  "death_x": ' .. tostring(data.death_x or 0) .. ",\n"
+		jsonContent = jsonContent .. '  "death_y": ' .. tostring(data.death_y or 0) .. ",\n"
 		jsonContent = jsonContent .. '  "fullClear_MtMoon": ' .. tostring(data.fullClear_MtMoon or false) .. ",\n"
 		jsonContent = jsonContent .. '  "fullClear_RockTunnel": ' .. tostring(data.fullClear_RockTunnel or false) .. ",\n"
 		jsonContent = jsonContent .. '  "fullClear_SilphCo": ' .. tostring(data.fullClear_SilphCo or false) .. ",\n"
@@ -845,6 +850,16 @@ local function IronmonVS()
 		info.trainerCount = trainerCount
 		info.badgeCount = badgeCount
 		info.routeName = routeName
+
+		-- Run-end overworld tile for the death-puddle overlay: read the player's tile from
+		-- gObjectEvents[0] (FRLG), same source the ghost overlay uses. Written on every update;
+		-- the final (game-over) snapshot leaves it frozen at the tile where the run ended.
+		-- Guarded so a bad memory read can never break the data update; defaults to 0.
+		info.death_map = TrackerAPI.getMapId() or 0
+		local okDX, dX = pcall(Memory.readword, 0x02036E38 + 0x10)
+		local okDY, dY = pcall(Memory.readword, 0x02036E38 + 0x12)
+		info.death_x = (okDX and dX) or 0
+		info.death_y = (okDY and dY) or 0
 
 		-- Add dungeon full clear data
 		info.fullClear_MtMoon = dungeonClears.MtMoon or false
@@ -1881,6 +1896,127 @@ local function IronmonVS()
 	end
 	-- =================== END GHOST PLAYERS =========================================
 
+	-- ===================== DEATH PUDDLES (optional, removable) =====================
+	-- Static, faded-red markers where OTHER players' runs ended on the SAME seed. The monitor
+	-- fetches them from the server (visibility is a per-competition host setting: off/global/
+	-- team) and writes puddle_in.txt as TSV: name<TAB>map<TAB>x<TAB>y<TAB>milestone<TAB>mon<TAB>lvl.
+	-- Purely visual. Every call site is pcall-wrapped so a failure here can't break the
+	-- extension. Reuses the ghost block's helpers (withAlpha, readS16) + memory constants
+	-- (GHOST_OBJEVENTS/GHOST_SCO_*), so keep this block below the GHOST block. To remove:
+	-- delete this block and its 3 call sites (startup path, inputCheckBizhawk, afterRedraw).
+	local PUDDLE_ENABLED = true
+	local PUDDLE_IN_FILE = "puddle_in.txt"     -- written by the monitor, read here (TSV)
+	local PUDDLE_NEAR = 1                        -- Chebyshev tile distance that reveals the info panel
+	local PUDDLE_READ_EVERY = 30                -- frames between file re-reads (~0.5s; monitor writes ~2/min)
+	local PUDDLE_FILL = 0xFFFF3030             -- ARGB red base (alpha applied per-draw)
+	local PUDDLE_FILL_A = 70                     -- faded fill opacity
+	local PUDDLE_EDGE_A = 120                    -- slightly stronger rim
+	local puddleInPath                          -- set in self.startup()
+	local puddles = {}                          -- list of {name,map,x,y,milestone,mon,lvl}
+	local puddleFrame = 0
+	local pPxStill, pPyStill, pScoxStill, pScoyStill, pLastScox, pLastScoy  -- own smooth-scroll calibration
+
+	-- Parse puddle_in.txt (TSV, 7 columns) into `puddles`. Independent of the ghost reader.
+	local function puddleRead()
+		if not PUDDLE_ENABLED or not puddleInPath then return end
+		local lines = FileManager.readLinesFromFile(puddleInPath)
+		local list = {}
+		if lines then
+			for _, line in ipairs(lines) do
+				local name, m, x, y, rest = line:match("^(.-)\t(%-?%d+)\t(%-?%d+)\t(%-?%d+)\t(.*)$")
+				if name and name ~= "" then
+					local milestone, mon, lvl = "", "", ""
+					if rest then
+						local ms, mn, lv = rest:match("^(.-)\t(.-)\t(.*)$")
+						if ms then milestone, mon, lvl = ms, mn, lv end
+					end
+					table.insert(list, { name = name, map = tonumber(m), x = tonumber(x),
+						y = tonumber(y), milestone = milestone or "", mon = mon or "", lvl = lvl or "" })
+				end
+			end
+		end
+		puddles = list
+	end
+
+	-- Small panel (top-left) naming who fell on/next to the player's tile. Stacks all nearby.
+	local function puddleDrawInfo(list)
+		local x, y = 6, 14
+		local header = (#list == 1) and "Run ended here:" or (tostring(#list) .. " runs ended here:")
+		Drawing.drawText(x, y, header, withAlpha(0xFFFF6666, 255), withAlpha(0x000000, 210))
+		local row = 0
+		for _, p in ipairs(list) do
+			if row >= 4 then
+				Drawing.drawText(x, y + 12 + row * 10, "...", withAlpha(0xFFFFFFFF, 255), withAlpha(0x000000, 210))
+				break
+			end
+			local detail = p.name
+			if p.mon and p.mon ~= "" then
+				detail = detail .. " - " .. p.mon
+				if p.lvl and p.lvl ~= "" and p.lvl ~= "0" then detail = detail .. " Lv" .. p.lvl end
+			end
+			if p.milestone and p.milestone ~= "" and p.milestone ~= "none" then
+				detail = detail .. " (" .. p.milestone .. ")"
+			end
+			Drawing.drawText(x, y + 12 + row * 10, detail, withAlpha(0xFFFFFFFF, 255), withAlpha(0x000000, 210))
+			row = row + 1
+		end
+	end
+
+	-- Draw a faded red puddle on every same-map run-end tile; reveal info for any within
+	-- PUDDLE_NEAR tiles. Static (no glide) but slides smoothly with the world via the same
+	-- still-reference / camera-scroll trick the ghosts use (own calibration vars).
+	local function puddleDraw()
+		if not PUDDLE_ENABLED then return end
+		if Battle ~= nil and Battle.inBattleScreen then return end
+		if #puddles == 0 then return end
+		local myMap = TrackerAPI.getMapId() or 0
+		local scox = readS16(GHOST_SCO_X)
+		local scoy = readS16(GHOST_SCO_Y)
+		local prevScox = pLastScox or scox
+		local prevScoy = pLastScoy or scoy
+		if pPxStill == nil or (scox == prevScox and scoy == prevScoy) then
+			pPxStill = Memory.readword(GHOST_OBJEVENTS + 0x10)
+			pPyStill = Memory.readword(GHOST_OBJEVENTS + 0x12)
+			pScoxStill = scox
+			pScoyStill = scoy
+		end
+		pLastScox = scox
+		pLastScoy = scoy
+		if pPxStill == nil then return end
+		local myX = Memory.readword(GHOST_OBJEVENTS + 0x10)
+		local myY = Memory.readword(GHOST_OBJEVENTS + 0x12)
+		local cx = Constants.SCREEN.WIDTH / 2 - 8
+		local cy = Constants.SCREEN.HEIGHT / 2 - 8
+		local near = nil
+		for _, p in ipairs(puddles) do
+			if p.map == myMap and p.x and p.y then
+				local sx = math.floor(cx + (p.x - pPxStill) * 16 + (scox - pScoxStill))
+				local sy = math.floor(cy + (p.y - pPyStill) * 16 + (scoy - pScoyStill))
+				if sx > -20 and sx < Constants.SCREEN.WIDTH and sy > -20 and sy < Constants.SCREEN.HEIGHT + 20 then
+					-- faded red splat sitting on the ground of the tile (two stacked ellipses
+					-- give a soft edge without needing an image asset).
+					gui.drawEllipse(sx, sy + 8, 15, 8, withAlpha(PUDDLE_FILL, PUDDLE_EDGE_A), withAlpha(PUDDLE_FILL, PUDDLE_FILL_A))
+					gui.drawEllipse(sx + 3, sy + 10, 9, 4, withAlpha(PUDDLE_FILL, 0), withAlpha(PUDDLE_FILL, PUDDLE_FILL_A))
+				end
+				if math.max(math.abs(p.x - myX), math.abs(p.y - myY)) <= PUDDLE_NEAR then
+					near = near or {}
+					table.insert(near, p)
+				end
+			end
+		end
+		if near then puddleDrawInfo(near) end
+	end
+
+	-- Called each frame (Bizhawk); throttle the file read (the draw itself runs every frame).
+	local function puddleFrameUpdate()
+		if not PUDDLE_ENABLED then return end
+		puddleFrame = puddleFrame + 1
+		if puddleFrame % PUDDLE_READ_EVERY == 1 then   -- read on frame 1 too (no startup delay)
+			pcall(puddleRead)
+		end
+	end
+	-- =================== END DEATH PUDDLES =========================================
+
 	-- ===================== FIRST-TIME SETUP (ROM patch + Tracker profile) =====================
 	-- One-time onboarding: patch the player's own FireRed into the IronmonVS base ROM (via the
 	-- bundled RomPatch/IronMonVS.ips), then create a Tracker "Generate ROM each time" New Run
@@ -2174,6 +2310,7 @@ local function IronmonVS()
 		end
 		drawSeedDisplay()
 		pcall(ghostDraw)  -- ghost players (removable)
+		pcall(puddleDraw)  -- death puddles (removable)
 	end
 
 	-- [Bizhawk only] Executed each frame: detect a click on the warning's "Open Monitor"
@@ -2181,6 +2318,7 @@ local function IronmonVS()
 	-- mouse input, so the hit-test matches what's drawn on the game screen.
 	function self.inputCheckBizhawk()
 		pcall(ghostFrameUpdate)  -- ghost players: read my pos + others (removable)
+		pcall(puddleFrameUpdate)  -- death puddles: throttled file read (removable)
 		local setupBanner = self.Setup.warnActive and not self.Setup.ready
 		if not setupBanner and not self.MonitorWarn.active then
 			self._bannerMouseDown = false
@@ -2214,6 +2352,7 @@ local function IronmonVS()
 		ghostInPath = extFolderPath .. GHOST_IN_FILE
 		ghostSpritePath = extFolderPath .. GHOST_SPRITE_FILE
 		ghostRedSpritePath = extFolderPath .. GHOST_RED_FILE
+		puddleInPath = extFolderPath .. PUDDLE_IN_FILE   -- death puddles (removable)
 
 		-- First-time setup paths (see the FIRST-TIME SETUP section). ROM/patch/state live in the
 		-- extension folder; the rules file ships with the Tracker under ironmon_tracker/.
