@@ -153,7 +153,7 @@ local function IronmonVS()
 		stateFile   = "setup_state.json",               -- our tiny idempotency record
 		rulesName   = "FRLG Kaizo.rnqs",                -- ships with the Tracker
 		profileName = "IronmonVS",
-		version     = 1,           -- bump when the base ROM / IPS changes, to force a re-patch
+		version     = 1,           -- legacy re-patch lever; baseAdler now auto-forces a re-patch on any IPS change
 		romSize     = 16777216,    -- 16MB FireRed
 		baseAdler   = 0x68b4b387,  -- adler32 of the correctly-patched IronmonVS base ROM
 		sourceAdler = 0x57240b31,  -- adler32 of the expected vanilla FireRed (USA) source
@@ -2148,7 +2148,7 @@ local function IronmonVS()
 
 	function self.writeSetupState(guid)
 		local st = { version = self.Setup.version, rom = self.SetupPaths.rom,
-		             size = self.Setup.romSize, guid = guid }
+		             size = self.Setup.romSize, guid = guid, baseAdler = self.Setup.baseAdler }
 		pcall(function() FileManager.encodeToJsonFile(self.SetupPaths.state, st) end)
 	end
 
@@ -2269,8 +2269,29 @@ local function IronmonVS()
 
 		local P = self.SetupPaths
 		local st = self.readSetupState()
-		local romOk = st and st.version == self.Setup.version
-			and FileManager.fileExists(P.rom) and (fileSize(P.rom) == self.Setup.romSize)
+
+		-- The base ROM is "current" only if the recorded patch version AND baseAdler match today's
+		-- Setup constants. baseAdler is the checksum of the correctly-patched ROM, so it necessarily
+		-- changes whenever the shipped IPS changes -- that's what forces existing players onto the new
+		-- ROM after an extension update (patchFromRom verifies the freshly-patched ROM against the same
+		-- constant). Cheap path: trust the recorded values, no 16MB re-hash on every load.
+		local romPresent = st and FileManager.fileExists(P.rom) and (fileSize(P.rom) == self.Setup.romSize)
+		local romOk = romPresent and st.version == self.Setup.version
+			and st.baseAdler == self.Setup.baseAdler
+
+		-- One-time migration: state files written before baseAdler tracking have no baseAdler field,
+		-- so the check above would needlessly re-prompt those players. Verify the existing ROM's bytes
+		-- once (adler32 of 16MB) and, if they already match, re-stamp the state so later loads stay
+		-- cheap. A real mismatch falls through to the re-patch banner below.
+		if romPresent and not romOk and st.baseAdler == nil and st.version == self.Setup.version then
+			pcall(function()
+				local bytes = readWholeFile(P.rom)
+				if bytes and adler32(bytes) == self.Setup.baseAdler then
+					self.writeSetupState(st.guid)   -- stamps baseAdler onto the existing state
+					romOk = true
+				end
+			end)
+		end
 
 		if romOk then
 			local haveProfile = false
