@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.33",
+		version = "1.34",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -97,6 +97,10 @@ local function IronmonVS()
 
 	-- Clickable "Open Monitor" button inside the warning banner (game-screen coords).
 	self.WarnButton = { x = 6, y = 23, w = 150, h = 13 }
+	-- The end-of-run / wrong-seed banners can be dismissed with an on-screen "Got it" button so the
+	-- player can read the Tracker's log viewer underneath. Auto-resets once the correct seed loads.
+	self.SeedBannerDismissed = false
+	self.GotItButton = { x = 0, y = 2, w = 40, h = 11 }   -- x resolved at draw time (screen width)
 
 	-- Milestone order from lowest to highest
 	self.MILESTONE_ORDER = {
@@ -155,7 +159,7 @@ local function IronmonVS()
 		profileName = "IronmonVS",
 		version     = 1,           -- legacy re-patch lever; baseAdler now auto-forces a re-patch on any IPS change
 		romSize     = 16777216,    -- 16MB FireRed
-		baseAdler   = 0x4a73b382,  -- adler32 of the correctly-patched IronmonVS base ROM (matches Build/IronMonVS.ips)
+		baseAdler   = 0xa501b3f4,  -- adler32 of the correctly-patched IronmonVS base ROM (matches Build/IronMonVS.ips)
 		sourceAdler = 0x57240b31,  -- adler32 of the expected vanilla FireRed (USA) source
 		ready       = false,       -- set true by self.checkSetup() once everything is in place
 		warnActive  = false,       -- show the "Set up IronmonVS" banner
@@ -1491,6 +1495,7 @@ local function IronmonVS()
 			self.WrongSeed, self.WrongRom, self.RunEndRecent = false, false, false
 			self.SeedCheck.mismatchSince = nil
 			self.SeedCheck.lastLoaded, self.SeedCheck.lastExpected = nil, nil
+			self.SeedBannerDismissed = false
 			return
 		end
 
@@ -1512,6 +1517,7 @@ local function IronmonVS()
 		if not (wrongRom or wrongSeed) then
 			self.WrongSeed, self.WrongRom = false, false
 			self.SeedCheck.mismatchSince = nil
+			self.SeedBannerDismissed = false   -- correct seed back -> allow the banner again next time
 		else
 			-- Restart the grace timer if the situation changed (e.g. just re-rolled / swapped).
 			if self.SeedCheck.lastLoaded ~= loaded or self.SeedCheck.lastExpected ~= expected
@@ -1527,6 +1533,16 @@ local function IronmonVS()
 		self.SeedCheck.lastWrongRom = wrongRom
 	end
 
+	-- Small "Got it" dismiss button on the seed/end-of-run banners (top-right so it clears the
+	-- left-aligned text). Clicking it (handled in inputCheckBizhawk) hides the banner so the player
+	-- can read the Tracker's log viewer underneath. x is resolved here from the live screen width.
+	local function drawGotItButton()
+		local b = self.GotItButton
+		b.x = Constants.SCREEN.WIDTH - b.w - 4
+		gui.drawRectangle(b.x, b.y, b.w, b.h, 0xFFFFFFFF, 0xC0303030)
+		Drawing.drawText(b.x + 6, b.y + 1, "Got it", 0xFFFFFFFF, 0xFF000000)
+	end
+
 	-- Banner warning the player they've loaded a seed that isn't the competition's current
 	-- seed, and to re-create it (a New Run regenerates the correct, server-assigned seed).
 	local function drawWrongSeedWarning()
@@ -1536,6 +1552,7 @@ local function IronmonVS()
 		Drawing.drawText(6, 2, "WRONG SEED LOADED", 0xFFFFFF00, 0xFF000000)
 		Drawing.drawText(6, 12, "Check your New Run setup, then", 0xFFFFFFFF, 0xFF000000)
 		Drawing.drawText(6, 23, "press A + B + Start", 0xFFFFFFFF, 0xFF000000)
+		drawGotItButton()
 	end
 
 	-- Banner warning the player they've loaded the WRONG ROM (not the competition's
@@ -1548,6 +1565,7 @@ local function IronmonVS()
 		Drawing.drawText(6, 2, "WRONG ROM LOADED", 0xFFFFFF00, 0xFF000000)
 		Drawing.drawText(6, 12, "Not your competition ROM.", 0xFFFFFFFF, 0xFF000000)
 		Drawing.drawText(6, 23, "Create a new seed (New Run).", 0xFFFFFFFF, 0xFF000000)
+		drawGotItButton()
 	end
 
 	-- Calm banner shown when a seed mismatch is really just the churn right after a run ends
@@ -1559,6 +1577,7 @@ local function IronmonVS()
 		gui.drawRectangle(0, 0, w, 27, 0xFF1E7A1E, 0xFF1E7A1E)
 		Drawing.drawText(6, 2, "End of run detected", 0xFFFFFFFF, 0xFF000000)
 		Drawing.drawText(6, 13, "Start a New Run for your next seed", 0xFFFFFFFF, 0xFF000000)
+		drawGotItButton()
 	end
 
 	-- ===================== GHOST PLAYERS (optional, removable) =====================
@@ -2384,13 +2403,16 @@ local function IronmonVS()
 			drawSetupBanner()
 		elseif self.MonitorWarn.active then
 			drawMonitorWarning()
-		elseif (self.WrongSeed or self.WrongRom) and self.RunEndRecent then
-			-- Right after a run ends, a mismatch is expected churn -- don't cry "wrong seed".
-			drawEndOfRunBanner()
-		elseif self.WrongRom then
-			drawWrongRomWarning()
-		elseif self.WrongSeed then
-			drawWrongSeedWarning()
+		elseif (self.WrongSeed or self.WrongRom) and not self.SeedBannerDismissed then
+			-- Dismissable with the "Got it" button so the log viewer can be read underneath.
+			if self.RunEndRecent then
+				-- Right after a run ends, a mismatch is expected churn -- don't cry "wrong seed".
+				drawEndOfRunBanner()
+			elseif self.WrongRom then
+				drawWrongRomWarning()
+			else
+				drawWrongSeedWarning()
+			end
 		end
 		drawSeedDisplay()
 		pcall(ghostDraw)  -- ghost players (removable)
@@ -2404,7 +2426,10 @@ local function IronmonVS()
 		pcall(ghostFrameUpdate)  -- ghost players: read my pos + others (removable)
 		pcall(puddleFrameUpdate)  -- death puddles: throttled file read (removable)
 		local setupBanner = self.Setup.warnActive and not self.Setup.ready
-		if not setupBanner and not self.MonitorWarn.active then
+		-- The seed/end-of-run banner shows a "Got it" dismiss button (mirrors the afterRedraw dispatch).
+		local seedBanner = not setupBanner and not self.MonitorWarn.active
+			and (self.WrongSeed or self.WrongRom) and not self.SeedBannerDismissed
+		if not setupBanner and not self.MonitorWarn.active and not seedBanner then
 			self._bannerMouseDown = false
 			return
 		end
@@ -2420,6 +2445,8 @@ local function IronmonVS()
 				if hit(self.Setup.Button) then pcall(self.runSetup) end
 			elseif self.MonitorWarn.active then
 				if hit(self.WarnButton) then self.launchMonitor() end
+			elseif seedBanner then
+				if hit(self.GotItButton) then self.SeedBannerDismissed = true end
 			end
 		end
 		self._bannerMouseDown = down
