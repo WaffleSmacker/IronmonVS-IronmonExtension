@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.31",
+		version = "1.32",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -155,7 +155,7 @@ local function IronmonVS()
 		profileName = "IronmonVS",
 		version     = 1,           -- legacy re-patch lever; baseAdler now auto-forces a re-patch on any IPS change
 		romSize     = 16777216,    -- 16MB FireRed
-		baseAdler   = 0x68b4b387,  -- adler32 of the correctly-patched IronmonVS base ROM
+		baseAdler   = 0x4a73b382,  -- adler32 of the correctly-patched IronmonVS base ROM (matches Build/IronMonVS.ips)
 		sourceAdler = 0x57240b31,  -- adler32 of the expected vanilla FireRed (USA) source
 		ready       = false,       -- set true by self.checkSetup() once everything is in place
 		warnActive  = false,       -- show the "Set up IronmonVS" banner
