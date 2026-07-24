@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.35",
+		version = "1.40",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
