@@ -1,6 +1,6 @@
 local function IronmonVS()
 	local self = {
-		version = "1.42",
+		version = "1.43",
 		name = "Ironmon VS",
 		author = "WaffleSmacker",
 		description = "Created for Ironmon VS. Used to send data to the website.",
@@ -239,6 +239,17 @@ local function IronmonVS()
 		return nil, 0, 0, "Failed to get trainer data"
 	end
 
+	-- Randomizer seeds are 48-bit (up to 15 digits). On Lua 5.1 (older BizHawk builds),
+	-- tostring()/%.14g renders numbers >= 1e14 in ROUNDED scientific notation ("2.799e+14"),
+	-- silently corrupting the seed once it reaches the JSON file. Seeds must therefore be
+	-- carried as exact digit STRINGS everywhere; if a number sneaks in, %.0f recovers every
+	-- digit exactly (48 bits < 2^53, so the double itself is still exact).
+	local function seedToString(seed)
+		if seed == nil then return nil end
+		if type(seed) == "number" then return string.format("%.0f", seed) end
+		return tostring(seed):match("^%s*(%d+)%s*$")
+	end
+
 	-- Function to write data to JSON file
 	local function writeDataToFile(data)
 		local file = io.open(self.Paths.DataOutput, "w")
@@ -302,7 +313,10 @@ local function IronmonVS()
 		jsonContent = jsonContent .. '  "fullClear_VictoryRoad": ' .. tostring(data.fullClear_VictoryRoad or false) .. ",\n"
 		jsonContent = jsonContent .. '  "fullClear_PokemonTower": ' .. tostring(data.fullClear_PokemonTower or false) .. ",\n"
 		jsonContent = jsonContent .. '  "fullClear_CinnabarMansion": ' .. tostring(data.fullClear_CinnabarMansion or false) .. ",\n"
-		jsonContent = jsonContent .. '  "RandomSeed": ' .. (data.RandomSeed and tostring(data.RandomSeed) or "null") .. ",\n"
+		-- Seed is written as a JSON STRING: a bare number would be parsed as a float
+		-- downstream and lose digits (see seedToString).
+		local seedStr = seedToString(data.RandomSeed)
+		jsonContent = jsonContent .. '  "RandomSeed": ' .. (seedStr and ('"' .. seedStr .. '"') or "null") .. ",\n"
 		-- Encode the nested extra payload defensively: never let it corrupt the data file.
 		local extraJson = "null"
 		local okExtra, encoded = pcall(encodeJson, data.extra)
@@ -452,7 +466,7 @@ local function IronmonVS()
 					if seedMatch then break end
 				end
 			end
-			return seedMatch and tonumber(seedMatch) or nil
+			return seedToString(seedMatch)
 		end)
 		if ok then return result end
 		return nil
@@ -688,17 +702,10 @@ local function IronmonVS()
 				if type(RandomizerLog.Data) == "table" then
 					-- First check if already parsed
 					if type(RandomizerLog.Data.Settings) == "table" then
-						local seed = RandomizerLog.Data.Settings.RandomSeed
-						if seed then
-							if type(seed) == "string" and seed ~= "" then
-								local numSeed = tonumber(seed)
-								if numSeed then return numSeed end
-							elseif type(seed) == "number" then
-								return seed
-							end
-						end
+						local seed = seedToString(RandomizerLog.Data.Settings.RandomSeed)
+						if seed then return seed end
 					end
-					
+
 					-- If RandomSeed is nil, the log may not have been parsed yet
 					-- Try to find and read the log file directly
 					local logPath = nil
@@ -756,34 +763,21 @@ local function IronmonVS()
 								RandomizerLog.parseRandomizerSettings(logLines)
 								-- Check again after parsing
 								if type(RandomizerLog.Data.Settings) == "table" then
-									local seed = RandomizerLog.Data.Settings.RandomSeed
-									if seed then
-										if type(seed) == "string" and seed ~= "" then
-											local numSeed = tonumber(seed)
-											if numSeed then return numSeed end
-										elseif type(seed) == "number" then
-											return seed
-										end
-									end
+									local seed = seedToString(RandomizerLog.Data.Settings.RandomSeed)
+									if seed then return seed end
 								end
 							end
-							
+
 							-- Fallback: parse manually using the pattern
 							if type(RandomizerLog.Patterns) == "table" and type(RandomizerLog.Patterns.RandomizerSeed) == "string" then
 								local pattern = RandomizerLog.Patterns.RandomizerSeed
-								local seedMatch = string.match(logLines[2] or "", pattern)
-								if seedMatch then
-									local numSeed = tonumber(seedMatch)
-									if numSeed then return numSeed end
-								end
+								local seed = seedToString(string.match(logLines[2] or "", pattern))
+								if seed then return seed end
 							end
-							
+
 							-- Last resort: try simple pattern matching
-							local seedMatch = string.match(logLines[2] or "", "Random Seed:%s*(%d+)")
-							if seedMatch then
-								local numSeed = tonumber(seedMatch)
-								if numSeed then return numSeed end
-							end
+							local seed = seedToString(string.match(logLines[2] or "", "Random Seed:%s*(%d+)"))
+							if seed then return seed end
 						end
 					end
 				end
@@ -1446,7 +1440,7 @@ local function IronmonVS()
 						local match = string.match((line:gsub("\r", "")), pattern)
 						if match then
 							file:close()
-							return tonumber(match)
+							return seedToString(match)
 						end
 					end
 					file:close()
@@ -1455,9 +1449,7 @@ local function IronmonVS()
 			-- Fallback: whatever the tracker has already parsed (e.g. via the log overlay).
 			if type(RandomizerLog) == "table" and type(RandomizerLog.Data) == "table"
 				and type(RandomizerLog.Data.Settings) == "table" then
-				local s = RandomizerLog.Data.Settings.RandomSeed
-				if type(s) == "number" then return s end
-				if type(s) == "string" and s ~= "" then return tonumber(s) end
+				return seedToString(RandomizerLog.Data.Settings.RandomSeed)
 			end
 			return nil
 		end)
@@ -1488,7 +1480,8 @@ local function IronmonVS()
 		if now - (self.SeedCheck.lastCheck or 0) < 1 then return end
 		self.SeedCheck.lastCheck = now
 
-		local expected = tonumber(self.SeedInfo.seed)
+		-- Digit-string compare, NOT tonumber: seeds stay strings end-to-end (see seedToString).
+		local expected = seedToString(self.SeedInfo.seed)
 
 		-- No competition seed expected -> nothing to enforce.
 		if not expected then
